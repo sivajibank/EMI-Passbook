@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -129,6 +130,8 @@ body{
 .bad{text-align:center;padding:30px 10px;}
 .bad h1{font-size:17px;color:var(--maroon);margin-bottom:8px;}
 .bad p{font-size:12px;color:var(--muted);line-height:1.65;}
+.diag{margin-top:14px;padding:8px 10px;background:rgba(184,134,11,.1);border-radius:8px;
+  font-size:9.5px;color:#8A6D00;line-height:1.5;}
 </style>
 </head>
 <body>
@@ -174,20 +177,49 @@ var R=function(v){return '\u20B9'+Math.round(v||0).toLocaleString('en-IN');};
 var fD=function(d){if(!d)return '\u2014';var p=String(d).split('-');return p.length===3?p[2]+'/'+p[1]+'/'+p[0]:d;};
 var todayISO=function(){var n=new Date();return n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+String(n.getDate()).padStart(2,'0');};
 
-/* ── decode payload from the URL fragment ── */
-try{
-  var frag=(location.hash||'').replace(/^#/,'');
-  if(frag) D=JSON.parse(LZString.decompressFromEncodedURIComponent(frag));
-}catch(e){ D=null; }
+/* ── decode payload from the URL fragment ─────────────────────────────────
+   Some share paths mangle the fragment on the way here: a few in-app browsers
+   percent-encode it, some replace '+' with a space, and long links occasionally
+   get clipped. Try the plausible repairs before giving up, and never throw —
+   an uncaught error just leaves the reader staring at a blank page.          */
+function readFragment(){
+  var raw=(location.hash||'').replace(/^#/,'');
+  if(!raw) return {frag:'', data:null};
+  var tries=[raw];
+  if(raw.indexOf('%')>-1){ try{ tries.push(decodeURIComponent(raw)); }catch(e){} }
+  if(raw.indexOf(' ')>-1) tries.push(raw.replace(/ /g,'+'));
+  for(var i=0;i<tries.length;i++){
+    try{
+      var s=LZString.decompressFromEncodedURIComponent(tries[i]);
+      if(s){ var o=JSON.parse(s); if(o&&o.s) return {frag:raw, data:o}; }
+    }catch(e){}
+  }
+  return {frag:raw, data:null};
+}
 
-if(!D||!D.s){
+var _read=readFragment();
+D=_read.data;
+
+if(!D){
+  var body, diag='';
+  if(!_read.frag){
+    /* Opened bare — the page itself is fine, there is just nothing to show. */
+    body='<h1>Nothing to open yet</h1><p>This page only works when it is opened '+
+      'from the QR code on your receipt or passbook card, or from the link the shop sent you — '+
+      'your details travel inside that link.<br><br>'+
+      'Please scan the QR again, or tap the link in your message.<br><br>'+
+      '<span class="ta">ரசீதில் உள்ள QR-ஐ ஸ்கேன் செய்து திறக்கவும்.</span></p>';
+  } else {
+    body='<h1>Link not readable</h1><p>This passbook link looks incomplete — it was probably '+
+      'cut short when it was copied or forwarded. Please scan the QR on your receipt again, '+
+      'or ask the shop to resend the link.<br><br>'+
+      '<span class="ta">இந்த இணைப்பு முழுமையாக இல்லை. ரசீதில் உள்ள QR-ஐ மீண்டும் ஸ்கேன் செய்யவும்.</span></p>';
+    diag='<div class="diag">Received '+_read.frag.length+' characters — a full link is usually 400–900. '+
+      'Show this line to the shop if it keeps happening.</div>';
+  }
   document.querySelector('.wrap').innerHTML=
-    '<div class="card"><div class="in"><div class="bad">'+
-    '<h1>Link not readable</h1><p>This EMI passbook link looks incomplete or was cut short when it was shared. '+
-    'Please ask the shop for a fresh link or scan the QR on your receipt again.<br><br>'+
-    '<span class="ta">இந்த இணைப்பு முழுமையாக இல்லை. ரசீதில் உள்ள QR-ஐ மீண்டும் ஸ்கேன் செய்யவும்.</span></p>'+
-    '</div></div></div>';
-  throw new Error('no payload');
+    '<div class="card"><div class="in"><div class="bad">'+body+diag+'</div></div></div>';
+  return;   /* stop cleanly — no uncaught error in the console */
 }
 
 EL('lkShop').textContent = D.sn || 'Passbook';
@@ -314,7 +346,6 @@ function render(){
     '<div class="rw"><span>Loan Amount<span class="ta">\u0B95\u0B9F\u0BA9\u0BCD \u0BA4\u0BCA\u0B95\u0BC8</span></span><b>'+R(D.am)+'</b></div>'+
     (D.dn?'<div class="rw"><span>Down Payment<span class="ta">\u0BAE\u0BC1\u0BA9\u0BCD\u0BAA\u0BA3\u0BAE\u0BCD</span></span><b>'+R(D.dn)+'</b></div>':'')+
     '<div class="rw"><span>Plan Type<span class="ta">\u0BA4\u0BBF\u0B9F\u0BCD\u0B9F \u0BB5\u0B95\u0BC8</span></span><b>'+esc(typeLbl)+'</b></div>'+
-    '<div class="rw"><span>Interest Rate<span class="ta">\u0BB5\u0B9F\u0BCD\u0B9F\u0BBF</span></span><b>'+esc(D.r||0)+'% / month</b></div>'+
     '<div class="rw"><span>Tenure<span class="ta">\u0B95\u0BBE\u0BB2\u0BAE\u0BCD</span></span><b>'+n+' months</b></div>'+
     (D.sd?'<div class="rw"><span>First Installment<span class="ta">\u0BAE\u0BC1\u0BA4\u0BB2\u0BCD \u0BA4\u0BB5\u0BA3\u0BC8</span></span><b>'+fD(D.sd)+'</b></div>':'')+
   '</div>'+
