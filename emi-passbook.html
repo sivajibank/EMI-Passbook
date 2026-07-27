@@ -1,4 +1,5 @@
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -338,7 +339,7 @@ function readFragment(){
   if(raw.indexOf(' ')>-1) tries.push(raw.replace(/ /g,'+'));
   for(var i=0;i<tries.length;i++){
     try{ var s=LZString.decompressFromEncodedURIComponent(tries[i]);
-      if(s){ var o=JSON.parse(s); if(o&&o.s) return {frag:raw,data:o}; } }catch(e){}
+      if(s){ var o=JSON.parse(s); if(o&&(o.s||o.n)) return {frag:raw,data:o}; } }catch(e){}
   }
   return {frag:raw,data:null};
 }
@@ -366,7 +367,8 @@ EL('lkShop').textContent=D.sn||'Passbook';
 EL('lkShopTa').textContent=D.snt||'';
 if(D.cn) EL('lkHi').textContent='Hello, '+D.cn;
 EL('foot').innerHTML=esc(D.sn||'')+(D.sp?' \u00B7 \u260E '+esc(D.sp):'')+
-  '<br>Snapshot taken '+fD(D.gen)+' \u00B7 computer-generated, valid without seal';
+  '<br>Snapshot taken '+fD(D.gen)+' \u00B7 computer-generated, valid without seal'+
+  '<br><span style="opacity:.55;">viewer v12</span>';
 
 /* ── PIN gate ── */
 var boxes=[].slice.call(document.querySelectorAll('#pins input')), tries=0;
@@ -421,7 +423,35 @@ function unlock(){
 
 /* ── derive plan figures ──
    row = [m, dueDate, emi, paidAmount, paidDate, lateFee, statusCode] */
-var TODAY=todayISO(), ROWS=D.s||[], N=ROWS.length;
+/* ── compact daily schedule (payload v3) ──
+   A 100-day plan used to ship 100 full rows inside the link, which made the
+   printed QR too dense to scan reliably. Daily plans now travel as a pattern
+   — first date, one repeated amount, ranges of rows paid in full and on time —
+   plus the handful of rows that break it. Rebuild the exact same row list here.
+   Links written by older app versions still carry `s` and are used as-is. */
+function expandSchedule(D){
+  if(D.s) return D.s;
+  if(!D.n||!D.d0) return [];
+  var base=new Date(D.d0+'T00:00:00'), step=(D.stp==='m')?'m':'d', de=D.de||0, out=[];
+  for(var i=0;i<D.n;i++){
+    var d=new Date(base.getTime());
+    if(step==='m'){ var day=base.getDate(); d.setDate(1); d.setMonth(base.getMonth()+i);
+      d.setDate(Math.min(day,new Date(d.getFullYear(),d.getMonth()+1,0).getDate())); }
+    else d.setDate(base.getDate()+i);
+    var iso=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    out.push([i+1, iso, de, 0, '', 0, 0]);
+  }
+  (D.pf||[]).forEach(function(rg){
+    for(var m=rg[0]; m<=rg[1]; m++){
+      var r=out[m-1]; if(!r) continue;
+      r[3]=r[2]; r[4]=r[1]; r[6]=2;      /* paid in full, on the due date */
+    }
+  });
+  (D.x||[]).forEach(function(r){ if(r&&r[0]&&out[r[0]-1]) out[r[0]-1]=r; });
+  return out;
+}
+
+var TODAY=todayISO(), ROWS=expandSchedule(D), N=ROWS.length;
 var paidCt=0,totalDue=0,totalPaid=0,nextRow=null,overdueCt=0;
 ROWS.forEach(function(r){
   totalDue+=(r[2]||0)+(r[5]||0);
@@ -431,7 +461,13 @@ ROWS.forEach(function(r){
 var balance=Math.max(0,totalDue-totalPaid);
 var pct=N?Math.round(paidCt/N*100):0;
 var nextAmt=nextRow?Math.max(0,(nextRow[2]||0)-(nextRow[3]||0)+(nextRow[5]||0)):0;
-var typeLbl={reducing:'Reducing Balance',flat:'Flat Rate',bullet:'Bullet / Lump Sum'}[D.ty]||D.ty||'\u2014';
+var typeLbl={reducing:'Reducing Balance',flat:'Flat Rate',bullet:'Bullet / Lump Sum',
+             daily100:'Daily Collection'}[D.ty]||D.ty||'\u2014';
+var IS_DAILY=(D.ty==='daily100'||D.stp==='d');
+/* A daily plan's rows are days, not months \u2014 saying "100 months" here was
+   the single most confusing thing a daily customer could be shown. */
+var TENURE_TXT=D.tn||(IS_DAILY?N+' days':N+' months');
+var UNIT=IS_DAILY?'Day':'Installment';
 var FILTER='all';
 
 function rowClass(r){
@@ -492,7 +528,7 @@ function render(){
     var link='upi://pay?pa='+encodeURIComponent(D.upi.pa)+'&pn='+encodeURIComponent(D.upi.pn||D.sn||'')+
              '&am='+Math.round(nextAmt)+'&cu=INR&tn='+encodeURIComponent('EMI '+(D.b||'')+' #'+nextRow[0]);
     upi='<a class="cta rv" href="'+link+'"><div class="big">Pay '+R(nextAmt)+' now</div>'+
-        '<div class="sm">GPay · PhonePe · Paytm &nbsp;\u00B7&nbsp; installment #'+nextRow[0]+'</div></a>';
+        '<div class="sm">GPay · PhonePe · Paytm &nbsp;\u00B7&nbsp; '+UNIT.toLowerCase()+' #'+nextRow[0]+'</div></a>';
   }
 
   var age=days(D.gen||TODAY,TODAY);
@@ -513,7 +549,7 @@ function render(){
         '<div class="of num">'+paidCt+'/'+N+' paid</div></div></div>'+
     '</div>'+
     '<div class="duechip"><span class="dot'+(late?' late':'')+'"></span>'+
-      '<div class="t">'+dueTxt+(nextRow?'<small>Installment #'+nextRow[0]+' \u00B7 '+fD(nextRow[1])+'</small>':'')+'</div></div>'+
+      '<div class="t">'+dueTxt+(nextRow?'<small>'+UNIT+' #'+nextRow[0]+' \u00B7 '+fD(nextRow[1])+'</small>':'')+'</div></div>'+
   '</section>'+
   stale+
   '<div class="kpis">'+
@@ -527,7 +563,7 @@ function render(){
       '<div class="v num" data-count="'+Math.round(totalDue)+'">\u20B90</div></div>'+
   '</div>'+
   upi+
-  '<section class="panel rv"><h2>Installment Ledger <span class="ta">தவணைப் பதிவு</span></h2>'+
+  '<section class="panel rv"><h2>'+(IS_DAILY?'Daily Collection Ledger':'Installment Ledger')+' <span class="ta">தவணைப் பதிவு</span></h2>'+
     '<div class="seg" role="tablist">'+
       '<button class="on" onclick="_segTo(\'all\',this)">All · '+N+'</button>'+
       '<button onclick="_segTo(\'due\',this)">Remaining · '+(N-paidCt)+'</button>'+
@@ -540,7 +576,7 @@ function render(){
     '<div class="rw"><span>Loan Amount<span class="ta">கடன் தொகை</span></span><b class="num">'+R(D.am)+'</b></div>'+
     (D.dn?'<div class="rw"><span>Down Payment<span class="ta">முன்பணம்</span></span><b class="num">'+R(D.dn)+'</b></div>':'')+
     '<div class="rw"><span>Plan Type<span class="ta">திட்ட வகை</span></span><b>'+esc(typeLbl)+'</b></div>'+
-    '<div class="rw"><span>Tenure<span class="ta">காலம்</span></span><b class="num">'+N+' months</b></div>'+
+    '<div class="rw"><span>Tenure<span class="ta">காலம்</span></span><b class="num">'+esc(TENURE_TXT)+'</b></div>'+
     (D.sd?'<div class="rw"><span>First Installment<span class="ta">முதல் தவணை</span></span><b class="num">'+fD(D.sd)+'</b></div>':'')+
   '</section>'+
   (D.sp?'<a class="ghost rv" href="tel:'+esc(D.sp)+'">\u260E Call the shop \u00B7 <span class="ta">கடையை அழைக்க</span></a>':'');
