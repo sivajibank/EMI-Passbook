@@ -1,3 +1,5 @@
+
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -621,8 +623,28 @@ function animate(){
         if(el.classList.contains('kpi')) setTimeout(function(){el.classList.add('lit');},260);
         io.unobserve(el);
       });
-    },{threshold:.12,rootMargin:'0px 0px -8% 0px'});
+    },{threshold:.01,rootMargin:'0px 0px 15% 0px'});
     items.forEach(function(el){io.observe(el);});
+
+    /* Fail-safe: the reveal is decoration, the ledger is the point. If the
+       observer never fires for the lower sections — a wrapping scroll
+       container, a view transition swallowing the callback, an embedded or
+       proxied page — those sections would sit at opacity 0 and the customer
+       would see a blank screen below the Pay button. Force everything visible
+       shortly after unlock, and again on the first scroll. */
+    var reveal=function(){
+      items.forEach(function(el){
+        if(el.classList.contains('in')) return;
+        el.style.transitionDelay='0ms';
+        el.classList.add('in');
+        if(el.classList.contains('kpi')) el.classList.add('lit');
+        io.unobserve(el);
+      });
+    };
+    setTimeout(reveal,1400);
+    window.addEventListener('scroll',function onFirstScroll(){
+      window.removeEventListener('scroll',onFirstScroll); setTimeout(reveal,300);
+    },{passive:true});
   }
 
   /* headline numbers */
