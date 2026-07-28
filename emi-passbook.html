@@ -347,12 +347,46 @@ var days=function(a,b){return Math.round((new Date(b+'T00:00:00')-new Date(a+'T0
 var REDUCED=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 var buzz=function(ms){ try{ if(navigator.vibrate&&!REDUCED) navigator.vibrate(ms); }catch(e){} };
 
+function b64uDec(str){
+  str=String(str).replace(/-/g,'+').replace(/_/g,'/');
+  while(str.length%4) str+='=';
+  var bin=atob(str), out=new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i);
+  return out;
+}
+/* The key arrives in the fragment, which browsers never put on the wire, so
+   the server that stored this blob could not read it and neither can anyone
+   who copies it out of storage. */
+function pbDecrypt(keyB64u, blobB64u){
+  var raw=b64uDec(blobB64u);
+  return crypto.subtle.importKey('raw', b64uDec(keyB64u), 'AES-GCM', false, ['decrypt'])
+    .then(function(k){
+      return crypto.subtle.decrypt({name:'AES-GCM', iv:raw.slice(0,12)}, k, raw.slice(12));
+    })
+    .then(function(pt){ return JSON.parse(new TextDecoder().decode(pt)); });
+}
+
 /* ── decode payload ─────────────────────────────────────────────────────────
    Share paths mangle fragments: some in-app browsers percent-encode them,
    some turn '+' into a space, long links occasionally get clipped. Try the
    plausible repairs, and never throw — an uncaught error leaves a blank page. */
+/* A live link looks like
+       L.<b64u worker url>.<record id>.<key>.<snapshot>
+   The snapshot on the end is the same payload old links carried, so the page
+   renders instantly and still works with no signal. LIVE holds the pointer;
+   the fetch happens after the PIN, never before. */
+var LIVE=null;
 function readFragment(){
   var raw=(location.hash||'').replace(/^#/,'');
+  if(raw.charAt(0)==='L' && raw.charAt(1)==='.'){
+    var p=raw.split('.');
+    if(p.length>=5){
+      try{
+        LIVE={ url:new TextDecoder().decode(b64uDec(p[1])), id:p[2], key:p[3] };
+      }catch(e){ LIVE=null; }
+      raw=p.slice(4).join('.');
+    }
+  }
   if(!raw) return {frag:'',data:null};
   var tries=[raw];
   if(raw.indexOf('%')>-1){ try{ tries.push(decodeURIComponent(raw)); }catch(e){} }
@@ -429,6 +463,83 @@ function swap(){
   EL('book').classList.add('show');
   window.scrollTo(0,0);
   animate();
+  refreshLive();
+}
+
+/* ── live refresh ─────────────────────────────────────────────────────────
+   Runs only after the PIN, so an unopened link never touches the network.
+   Any failure is silent and leaves the snapshot on screen: a customer with no
+   signal is no worse off than before live sync existed. */
+var PLANS=null, PLAN_I=0, ROOT=null;
+
+function pbBanner(kind, text){
+  var el=EL('pbsync');
+  if(!el){
+    el=document.createElement('div'); el.id='pbsync';
+    el.style.cssText='margin:0 0 10px;padding:7px 11px;border-radius:9px;font-size:11px;font-weight:700;text-align:center;';
+    var bk=EL('book'); bk.insertBefore(el, bk.firstChild);
+  }
+  var c={ live:['#0F3D24','#7FE0A8'], stale:['#3D3410','#E6C86B'], busy:['#22303F','#9FC4E0'] }[kind]||['#22303F','#9FC4E0'];
+  el.style.background=c[0]; el.style.color=c[1]; el.textContent=text;
+}
+
+function applyPlan(i){
+  if(!PLANS||!PLANS[i]) return;
+  PLAN_I=i;
+  var merged={}, k;
+  for(k in ROOT) if(k!=='plans') merged[k]=ROOT[k];
+  for(k in PLANS[i]) merged[k]=PLANS[i][k];
+  if(!merged.sec && ROOT.sec) merged.sec=ROOT.sec;
+  D=merged; derive(); render(); animate(); renderPlanTabs();
+}
+
+/* One customer can hold several loans at once. Tabs only appear when there is
+   genuinely more than one, so the common case stays uncluttered. */
+function renderPlanTabs(){
+  if(!PLANS||PLANS.length<2) return;
+  var el=EL('pbtabs');
+  if(!el){
+    el=document.createElement('div'); el.id='pbtabs';
+    el.style.cssText='display:flex;gap:6px;overflow-x:auto;margin:0 0 10px;padding-bottom:2px;';
+    var bk=EL('book'); bk.insertBefore(el, EL('pbsync')?EL('pbsync').nextSibling:bk.firstChild);
+  }
+  el.innerHTML=PLANS.map(function(p,i){
+    var on=(i===PLAN_I);
+    return '<button data-i="'+i+'" style="flex:0 0 auto;border:1px solid '+(on?'#C9A84C':'rgba(252,246,233,.22)')+
+      ';background:'+(on?'rgba(201,168,76,.22)':'transparent')+';color:'+(on?'#F3E4BC':'rgba(252,246,233,.72)')+
+      ';border-radius:999px;padding:6px 13px;font:inherit;font-size:11px;font-weight:800;cursor:pointer;">'+
+      'Pledge '+esc(p.b||('#'+(i+1)))+'</button>';
+  }).join('');
+  [].slice.call(el.querySelectorAll('button')).forEach(function(b){
+    b.addEventListener('click',function(){ applyPlan(parseInt(b.getAttribute('data-i'),10)); });
+  });
+}
+
+function refreshLive(){
+  if(!LIVE || !LIVE.url || !LIVE.id || !LIVE.key) return;
+  if(!(window.crypto && crypto.subtle)) return;      // needs https or localhost
+  pbBanner('busy','Checking for updates…');
+  fetch(LIVE.url.replace(/\/+$/,'')+'/p/'+encodeURIComponent(LIVE.id)+'?t='+Date.now(),
+        {cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
+    .then(function(blob){ return pbDecrypt(LIVE.key, blob.trim()); })
+    .then(function(fresh){
+      if(!fresh||!fresh.plans||!fresh.plans.length) throw new Error('empty');
+      ROOT=fresh; PLANS=fresh.plans;
+      /* Stay on the loan this card was printed for if it is still open,
+         otherwise fall to the first — a closed loan should not strand them. */
+      var want=D.b, idx=0;
+      if(want) PLANS.forEach(function(p,i){ if(p.b===want) idx=i; });
+      applyPlan(idx);
+      var when=fresh.ts?new Date(fresh.ts):null;
+      pbBanner('live','\u25CF Live \u00B7 updated '+(when?fD(when.getFullYear()+'-'+
+        String(when.getMonth()+1).padStart(2,'0')+'-'+String(when.getDate()).padStart(2,'0')):'just now')+
+        (PLANS.length>1?' \u00B7 '+PLANS.length+' loans':''));
+    })
+    .catch(function(){
+      pbBanner('stale','Offline \u2014 showing the details saved on this card'+
+        (D.gen?' ('+fD(D.gen)+')':''));
+    });
 }
 function unlock(){
   if(REDUCED){ swap(); return; }
@@ -471,23 +582,30 @@ function expandSchedule(D){
   return out;
 }
 
-var TODAY=todayISO(), ROWS=expandSchedule(D), N=ROWS.length;
-var paidCt=0,totalDue=0,totalPaid=0,nextRow=null,overdueCt=0;
-ROWS.forEach(function(r){
-  totalDue+=(r[2]||0)+(r[5]||0);
-  totalPaid+=(r[3]||0);
-  if(r[6]===2) paidCt++; else { if(!nextRow) nextRow=r; if(r[1]<TODAY) overdueCt++; }
-});
-var balance=Math.max(0,totalDue-totalPaid);
-var pct=N?Math.round(paidCt/N*100):0;
-var nextAmt=nextRow?Math.max(0,(nextRow[2]||0)-(nextRow[3]||0)+(nextRow[5]||0)):0;
-var typeLbl={reducing:'Reducing Balance',flat:'Flat Rate',bullet:'Bullet / Lump Sum',
-             daily100:'Daily Collection'}[D.ty]||D.ty||'\u2014';
-var IS_DAILY=(D.ty==='daily100'||D.stp==='d');
+var TODAY=todayISO(), ROWS, N, paidCt, totalDue, totalPaid, nextRow, overdueCt,
+    balance, pct, nextAmt, typeLbl, IS_DAILY, TENURE_TXT, UNIT;
+/* Everything on screen derives from D. Live refreshes and loan switching both
+   just reassign D and call this, so there is one code path, not two. */
+function derive(){
+  ROWS=expandSchedule(D); N=ROWS.length;
+  paidCt=0; totalDue=0; totalPaid=0; nextRow=null; overdueCt=0;
+  ROWS.forEach(function(r){
+    totalDue+=(r[2]||0)+(r[5]||0);
+    totalPaid+=(r[3]||0);
+    if(r[6]===2) paidCt++; else { if(!nextRow) nextRow=r; if(r[1]<TODAY) overdueCt++; }
+  });
+  balance=Math.max(0,totalDue-totalPaid);
+  pct=N?Math.round(paidCt/N*100):0;
+  nextAmt=nextRow?Math.max(0,(nextRow[2]||0)-(nextRow[3]||0)+(nextRow[5]||0)):0;
+  typeLbl={reducing:'Reducing Balance',flat:'Flat Rate',bullet:'Bullet / Lump Sum',
+           daily100:'Daily Collection'}[D.ty]||D.ty||'\u2014';
+  IS_DAILY=(D.ty==='daily100'||D.stp==='d');
+  TENURE_TXT=D.tn||(IS_DAILY?N+' days':N+' months');
+  UNIT=IS_DAILY?'Day':'Installment';
+}
+derive();
 /* A daily plan's rows are days, not months \u2014 saying "100 months" here was
    the single most confusing thing a daily customer could be shown. */
-var TENURE_TXT=D.tn||(IS_DAILY?N+' days':N+' months');
-var UNIT=IS_DAILY?'Day':'Installment';
 var FILTER='all';
 
 function rowClass(r){
