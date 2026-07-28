@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -205,11 +204,33 @@ body{
   box-shadow:0 16px 34px -14px rgba(46,155,87,.9), inset 0 1px 0 rgba(255,255,255,.24);
   transition:transform .3s var(--spring), box-shadow .3s var(--ease);}
 .cta:active{transform:scale(.982);box-shadow:0 8px 20px -12px rgba(46,155,87,.9);}
+/* the headline is a summary, not a link: a generic upi:// href here is what
+   Android was handing to WhatsApp instead of a real payment app */
+.cta-static{cursor:default;}
+.cta-static:active{transform:none;box-shadow:0 16px 34px -14px rgba(46,155,87,.9), inset 0 1px 0 rgba(255,255,255,.24);}
 .cta::after{content:'';position:absolute;top:0;bottom:0;width:70px;left:var(--sheen);
   background:linear-gradient(100deg,transparent,rgba(255,255,255,.3),transparent);
   animation:sheen 3.6s var(--ease) 1.6s infinite;}
 .cta .big{font-size:16px;font-weight:800;letter-spacing:-.01em;}
 .cta .sm{font-size:10px;font-weight:600;opacity:.85;margin-top:3px;}
+/* Pay-app chooser — one tile per UPI app, plus WhatsApp to reach the shop */
+.payrow{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin:-4px 0 12px;}
+.payapp{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;
+  text-decoration:none;font-family:inherit;cursor:pointer;
+  border:1px solid var(--glass-line);background:var(--glass);border-radius:var(--r-md);
+  padding:10px 4px 8px;transition:transform .25s var(--spring), border-color .25s var(--ease), background .25s var(--ease);}
+.payapp:active{transform:scale(.95);}
+.payapp .ic{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:900;color:#fff;letter-spacing:-.02em;}
+.payapp .nm{font-size:9px;font-weight:800;color:rgba(252,246,233,.9);letter-spacing:.01em;}
+.payapp.gpay  .ic{background:linear-gradient(135deg,#4285F4,#34A853);}
+.payapp.phonepe .ic{background:linear-gradient(135deg,#6739B7,#4B2A8A);}
+.payapp.paytm .ic{background:linear-gradient(135deg,#00BAF2,#012970);}
+.payapp.wa    .ic{background:linear-gradient(135deg,#25D366,#128C7E);}
+.payapp.gpay:hover{border-color:#4285F4;} .payapp.phonepe:hover{border-color:#6739B7;}
+.payapp.paytm:hover{border-color:#00BAF2;} .payapp.wa:hover{border-color:#25D366;}
+.payhint{font-size:9.5px;color:rgba(252,246,233,.5);text-align:center;margin:-6px 0 12px;line-height:1.5;}
+
 .ghost{display:block;width:100%;text-align:center;text-decoration:none;font-family:inherit;
   border:1px solid var(--glass-line);background:var(--glass);color:var(--gold-2);
   border-radius:var(--r-md);padding:13px;font-size:13px;font-weight:800;margin-bottom:12px;
@@ -522,12 +543,54 @@ function render(){
     :            'Due in '+dueIn+' days';
   var late = nextRow && dueIn<0;
 
+  /* ── Pay Now ────────────────────────────────────────────────────────────
+     The generic upi:// scheme lets the phone pick a handler, and on many
+     Android phones WhatsApp Pay grabs it — so tapping "Pay now" landed the
+     customer in WhatsApp instead of their usual app. Each major UPI app also
+     registers its own scheme, so offering them explicitly opens the right app
+     with no chooser dialog. WhatsApp stays as a way to reach the shop. */
   var upi='';
   if(D.upi&&D.upi.pa&&nextRow){
-    var link='upi://pay?pa='+encodeURIComponent(D.upi.pa)+'&pn='+encodeURIComponent(D.upi.pn||D.sn||'')+
-             '&am='+Math.round(nextAmt)+'&cu=INR&tn='+encodeURIComponent('EMI '+(D.b||'')+' #'+nextRow[0]);
-    upi='<a class="cta rv" href="'+link+'"><div class="big">Pay '+R(nextAmt)+' now</div>'+
-        '<div class="sm">GPay · PhonePe · Paytm &nbsp;\u00B7&nbsp; '+UNIT.toLowerCase()+' #'+nextRow[0]+'</div></a>';
+    var amt=Math.round(nextAmt*100)/100;
+    /* pa (the VPA) must NOT be percent-encoded: several UPI apps read the value
+       after "pa=" as a raw substring without url-decoding, so an encoded "@"
+       leaves the payee bank stuck loading. pn/tn are free text and do need it. */
+    var q='pa='+String(D.upi.pa).replace(/\s+/g,'')+
+          '&pn='+encodeURIComponent(D.upi.pn||D.sn||'')+
+          '&cu=INR&am='+amt.toFixed(2)+
+          '&tn='+encodeURIComponent('EMI '+(D.b||'')+' #'+nextRow[0]);
+    var SCHEMES={upi:'upi://pay?',gpay:'tez://upi/pay?',phonepe:'phonepe://pay?',paytm:'paytmmp://pay?'};
+    var payLink=function(k){ return (SCHEMES[k]||SCHEMES.upi)+q; };
+
+    upi='<div class="cta cta-static rv"><div class="big">Pay '+R(nextAmt)+' now</div>'+
+        '<div class="sm">'+UNIT+' #'+nextRow[0]+' &nbsp;\u00B7&nbsp; choose an app below</div></div>';
+
+    var apps=[
+      ['gpay','G','GPay'],
+      ['phonepe','\u20B1','PhonePe'],
+      ['paytm','P','Paytm']
+    ].map(function(a){
+      return '<a class="payapp '+a[0]+'" href="'+payLink(a[0])+'">'+
+             '<span class="ic">'+a[1]+'</span><span class="nm">'+a[2]+'</span></a>';
+    });
+
+    /* WhatsApp: opens a chat with the shop carrying the payment details, so the
+       customer can send the screenshot or ask a question. Falls back to the
+       plain wa.me site when no number is on the card. */
+    if(D.sp){
+      var digits=String(D.sp).replace(/\D/g,'');
+      if(digits.length===10) digits='91'+digits;
+      var waMsg=(D.cn||'')+' \u00B7 '+(D.b?'Pledge '+D.b+' \u00B7 ':'')+
+                UNIT+' #'+nextRow[0]+' \u00B7 '+R(nextAmt)+' due '+fD(nextRow[1]);
+      apps.push('<a class="payapp wa" target="_blank" rel="noopener" href="https://wa.me/'+digits+
+                '?text='+encodeURIComponent(waMsg)+'">'+
+                '<span class="ic">\u2709</span><span class="nm">WhatsApp</span></a>');
+    }
+
+    upi+='<div class="payrow rv">'+apps.join('')+'</div>'+
+         '<a class="ghost rv" href="'+payLink('upi')+'">Other UPI app \u00B7 BHIM, Amazon Pay, bank app</a>'+
+         '<div class="payhint">Tap your app to pay '+R(nextAmt)+' directly'+
+         (D.sp?' \u00B7 WhatsApp to message the shop':'')+'</div>';
   }
 
   var age=days(D.gen||TODAY,TODAY);
