@@ -204,11 +204,33 @@ body{
   box-shadow:0 16px 34px -14px rgba(46,155,87,.9), inset 0 1px 0 rgba(255,255,255,.24);
   transition:transform .3s var(--spring), box-shadow .3s var(--ease);}
 .cta:active{transform:scale(.982);box-shadow:0 8px 20px -12px rgba(46,155,87,.9);}
+/* the headline is a summary, not a link: a generic upi:// href here is what
+   Android was handing to WhatsApp instead of a real payment app */
+.cta-static{cursor:default;}
+.cta-static:active{transform:none;box-shadow:0 16px 34px -14px rgba(46,155,87,.9), inset 0 1px 0 rgba(255,255,255,.24);}
 .cta::after{content:'';position:absolute;top:0;bottom:0;width:70px;left:var(--sheen);
   background:linear-gradient(100deg,transparent,rgba(255,255,255,.3),transparent);
   animation:sheen 3.6s var(--ease) 1.6s infinite;}
 .cta .big{font-size:16px;font-weight:800;letter-spacing:-.01em;}
 .cta .sm{font-size:10px;font-weight:600;opacity:.85;margin-top:3px;}
+/* Pay-app chooser — one tile per UPI app, plus WhatsApp to reach the shop */
+.payrow{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin:-4px 0 12px;}
+.payapp{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;
+  text-decoration:none;font-family:inherit;cursor:pointer;
+  border:1px solid var(--glass-line);background:var(--glass);border-radius:var(--r-md);
+  padding:10px 4px 8px;transition:transform .25s var(--spring), border-color .25s var(--ease), background .25s var(--ease);}
+.payapp:active{transform:scale(.95);}
+.payapp .ic{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:900;color:#fff;letter-spacing:-.02em;}
+.payapp .nm{font-size:9px;font-weight:800;color:rgba(252,246,233,.9);letter-spacing:.01em;}
+.payapp.gpay  .ic{background:linear-gradient(135deg,#4285F4,#34A853);}
+.payapp.phonepe .ic{background:linear-gradient(135deg,#6739B7,#4B2A8A);}
+.payapp.paytm .ic{background:linear-gradient(135deg,#00BAF2,#012970);}
+.payapp.wa    .ic{background:linear-gradient(135deg,#25D366,#128C7E);}
+.payapp.gpay:hover{border-color:#4285F4;} .payapp.phonepe:hover{border-color:#6739B7;}
+.payapp.paytm:hover{border-color:#00BAF2;} .payapp.wa:hover{border-color:#25D366;}
+.payhint{font-size:9.5px;color:rgba(252,246,233,.5);text-align:center;margin:-6px 0 12px;line-height:1.5;}
+
 .ghost{display:block;width:100%;text-align:center;text-decoration:none;font-family:inherit;
   border:1px solid var(--glass-line);background:var(--glass);color:var(--gold-2);
   border-radius:var(--r-md);padding:13px;font-size:13px;font-weight:800;margin-bottom:12px;
@@ -325,12 +347,46 @@ var days=function(a,b){return Math.round((new Date(b+'T00:00:00')-new Date(a+'T0
 var REDUCED=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 var buzz=function(ms){ try{ if(navigator.vibrate&&!REDUCED) navigator.vibrate(ms); }catch(e){} };
 
+function b64uDec(str){
+  str=String(str).replace(/-/g,'+').replace(/_/g,'/');
+  while(str.length%4) str+='=';
+  var bin=atob(str), out=new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i);
+  return out;
+}
+/* The key arrives in the fragment, which browsers never put on the wire, so
+   the server that stored this blob could not read it and neither can anyone
+   who copies it out of storage. */
+function pbDecrypt(keyB64u, blobB64u){
+  var raw=b64uDec(blobB64u);
+  return crypto.subtle.importKey('raw', b64uDec(keyB64u), 'AES-GCM', false, ['decrypt'])
+    .then(function(k){
+      return crypto.subtle.decrypt({name:'AES-GCM', iv:raw.slice(0,12)}, k, raw.slice(12));
+    })
+    .then(function(pt){ return JSON.parse(new TextDecoder().decode(pt)); });
+}
+
 /* ── decode payload ─────────────────────────────────────────────────────────
    Share paths mangle fragments: some in-app browsers percent-encode them,
    some turn '+' into a space, long links occasionally get clipped. Try the
    plausible repairs, and never throw — an uncaught error leaves a blank page. */
+/* A live link looks like
+       L.<b64u worker url>.<record id>.<key>.<snapshot>
+   The snapshot on the end is the same payload old links carried, so the page
+   renders instantly and still works with no signal. LIVE holds the pointer;
+   the fetch happens after the PIN, never before. */
+var LIVE=null;
 function readFragment(){
   var raw=(location.hash||'').replace(/^#/,'');
+  if(raw.charAt(0)==='L' && raw.charAt(1)==='.'){
+    var p=raw.split('.');
+    if(p.length>=5){
+      try{
+        LIVE={ url:new TextDecoder().decode(b64uDec(p[1])), id:p[2], key:p[3] };
+      }catch(e){ LIVE=null; }
+      raw=p.slice(4).join('.');
+    }
+  }
   if(!raw) return {frag:'',data:null};
   var tries=[raw];
   if(raw.indexOf('%')>-1){ try{ tries.push(decodeURIComponent(raw)); }catch(e){} }
@@ -407,6 +463,83 @@ function swap(){
   EL('book').classList.add('show');
   window.scrollTo(0,0);
   animate();
+  refreshLive();
+}
+
+/* ── live refresh ─────────────────────────────────────────────────────────
+   Runs only after the PIN, so an unopened link never touches the network.
+   Any failure is silent and leaves the snapshot on screen: a customer with no
+   signal is no worse off than before live sync existed. */
+var PLANS=null, PLAN_I=0, ROOT=null;
+
+function pbBanner(kind, text){
+  var el=EL('pbsync');
+  if(!el){
+    el=document.createElement('div'); el.id='pbsync';
+    el.style.cssText='margin:0 0 10px;padding:7px 11px;border-radius:9px;font-size:11px;font-weight:700;text-align:center;';
+    var bk=EL('book'); bk.insertBefore(el, bk.firstChild);
+  }
+  var c={ live:['#0F3D24','#7FE0A8'], stale:['#3D3410','#E6C86B'], busy:['#22303F','#9FC4E0'] }[kind]||['#22303F','#9FC4E0'];
+  el.style.background=c[0]; el.style.color=c[1]; el.textContent=text;
+}
+
+function applyPlan(i){
+  if(!PLANS||!PLANS[i]) return;
+  PLAN_I=i;
+  var merged={}, k;
+  for(k in ROOT) if(k!=='plans') merged[k]=ROOT[k];
+  for(k in PLANS[i]) merged[k]=PLANS[i][k];
+  if(!merged.sec && ROOT.sec) merged.sec=ROOT.sec;
+  D=merged; derive(); render(); animate(); renderPlanTabs();
+}
+
+/* One customer can hold several loans at once. Tabs only appear when there is
+   genuinely more than one, so the common case stays uncluttered. */
+function renderPlanTabs(){
+  if(!PLANS||PLANS.length<2) return;
+  var el=EL('pbtabs');
+  if(!el){
+    el=document.createElement('div'); el.id='pbtabs';
+    el.style.cssText='display:flex;gap:6px;overflow-x:auto;margin:0 0 10px;padding-bottom:2px;';
+    var bk=EL('book'); bk.insertBefore(el, EL('pbsync')?EL('pbsync').nextSibling:bk.firstChild);
+  }
+  el.innerHTML=PLANS.map(function(p,i){
+    var on=(i===PLAN_I);
+    return '<button data-i="'+i+'" style="flex:0 0 auto;border:1px solid '+(on?'#C9A84C':'rgba(252,246,233,.22)')+
+      ';background:'+(on?'rgba(201,168,76,.22)':'transparent')+';color:'+(on?'#F3E4BC':'rgba(252,246,233,.72)')+
+      ';border-radius:999px;padding:6px 13px;font:inherit;font-size:11px;font-weight:800;cursor:pointer;">'+
+      'Pledge '+esc(p.b||('#'+(i+1)))+'</button>';
+  }).join('');
+  [].slice.call(el.querySelectorAll('button')).forEach(function(b){
+    b.addEventListener('click',function(){ applyPlan(parseInt(b.getAttribute('data-i'),10)); });
+  });
+}
+
+function refreshLive(){
+  if(!LIVE || !LIVE.url || !LIVE.id || !LIVE.key) return;
+  if(!(window.crypto && crypto.subtle)) return;      // needs https or localhost
+  pbBanner('busy','Checking for updates…');
+  fetch(LIVE.url.replace(/\/+$/,'')+'/p/'+encodeURIComponent(LIVE.id)+'?t='+Date.now(),
+        {cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
+    .then(function(blob){ return pbDecrypt(LIVE.key, blob.trim()); })
+    .then(function(fresh){
+      if(!fresh||!fresh.plans||!fresh.plans.length) throw new Error('empty');
+      ROOT=fresh; PLANS=fresh.plans;
+      /* Stay on the loan this card was printed for if it is still open,
+         otherwise fall to the first — a closed loan should not strand them. */
+      var want=D.b, idx=0;
+      if(want) PLANS.forEach(function(p,i){ if(p.b===want) idx=i; });
+      applyPlan(idx);
+      var when=fresh.ts?new Date(fresh.ts):null;
+      pbBanner('live','\u25CF Live \u00B7 updated '+(when?fD(when.getFullYear()+'-'+
+        String(when.getMonth()+1).padStart(2,'0')+'-'+String(when.getDate()).padStart(2,'0')):'just now')+
+        (PLANS.length>1?' \u00B7 '+PLANS.length+' loans':''));
+    })
+    .catch(function(){
+      pbBanner('stale','Offline \u2014 showing the details saved on this card'+
+        (D.gen?' ('+fD(D.gen)+')':''));
+    });
 }
 function unlock(){
   if(REDUCED){ swap(); return; }
@@ -449,23 +582,30 @@ function expandSchedule(D){
   return out;
 }
 
-var TODAY=todayISO(), ROWS=expandSchedule(D), N=ROWS.length;
-var paidCt=0,totalDue=0,totalPaid=0,nextRow=null,overdueCt=0;
-ROWS.forEach(function(r){
-  totalDue+=(r[2]||0)+(r[5]||0);
-  totalPaid+=(r[3]||0);
-  if(r[6]===2) paidCt++; else { if(!nextRow) nextRow=r; if(r[1]<TODAY) overdueCt++; }
-});
-var balance=Math.max(0,totalDue-totalPaid);
-var pct=N?Math.round(paidCt/N*100):0;
-var nextAmt=nextRow?Math.max(0,(nextRow[2]||0)-(nextRow[3]||0)+(nextRow[5]||0)):0;
-var typeLbl={reducing:'Reducing Balance',flat:'Flat Rate',bullet:'Bullet / Lump Sum',
-             daily100:'Daily Collection'}[D.ty]||D.ty||'\u2014';
-var IS_DAILY=(D.ty==='daily100'||D.stp==='d');
+var TODAY=todayISO(), ROWS, N, paidCt, totalDue, totalPaid, nextRow, overdueCt,
+    balance, pct, nextAmt, typeLbl, IS_DAILY, TENURE_TXT, UNIT;
+/* Everything on screen derives from D. Live refreshes and loan switching both
+   just reassign D and call this, so there is one code path, not two. */
+function derive(){
+  ROWS=expandSchedule(D); N=ROWS.length;
+  paidCt=0; totalDue=0; totalPaid=0; nextRow=null; overdueCt=0;
+  ROWS.forEach(function(r){
+    totalDue+=(r[2]||0)+(r[5]||0);
+    totalPaid+=(r[3]||0);
+    if(r[6]===2) paidCt++; else { if(!nextRow) nextRow=r; if(r[1]<TODAY) overdueCt++; }
+  });
+  balance=Math.max(0,totalDue-totalPaid);
+  pct=N?Math.round(paidCt/N*100):0;
+  nextAmt=nextRow?Math.max(0,(nextRow[2]||0)-(nextRow[3]||0)+(nextRow[5]||0)):0;
+  typeLbl={reducing:'Reducing Balance',flat:'Flat Rate',bullet:'Bullet / Lump Sum',
+           daily100:'Daily Collection'}[D.ty]||D.ty||'\u2014';
+  IS_DAILY=(D.ty==='daily100'||D.stp==='d');
+  TENURE_TXT=D.tn||(IS_DAILY?N+' days':N+' months');
+  UNIT=IS_DAILY?'Day':'Installment';
+}
+derive();
 /* A daily plan's rows are days, not months \u2014 saying "100 months" here was
    the single most confusing thing a daily customer could be shown. */
-var TENURE_TXT=D.tn||(IS_DAILY?N+' days':N+' months');
-var UNIT=IS_DAILY?'Day':'Installment';
 var FILTER='all';
 
 function rowClass(r){
@@ -521,12 +661,54 @@ function render(){
     :            'Due in '+dueIn+' days';
   var late = nextRow && dueIn<0;
 
+  /* ── Pay Now ────────────────────────────────────────────────────────────
+     The generic upi:// scheme lets the phone pick a handler, and on many
+     Android phones WhatsApp Pay grabs it — so tapping "Pay now" landed the
+     customer in WhatsApp instead of their usual app. Each major UPI app also
+     registers its own scheme, so offering them explicitly opens the right app
+     with no chooser dialog. WhatsApp stays as a way to reach the shop. */
   var upi='';
   if(D.upi&&D.upi.pa&&nextRow){
-    var link='upi://pay?pa='+encodeURIComponent(D.upi.pa)+'&pn='+encodeURIComponent(D.upi.pn||D.sn||'')+
-             '&am='+Math.round(nextAmt)+'&cu=INR&tn='+encodeURIComponent('EMI '+(D.b||'')+' #'+nextRow[0]);
-    upi='<a class="cta rv" href="'+link+'"><div class="big">Pay '+R(nextAmt)+' now</div>'+
-        '<div class="sm">GPay · PhonePe · Paytm &nbsp;\u00B7&nbsp; '+UNIT.toLowerCase()+' #'+nextRow[0]+'</div></a>';
+    var amt=Math.round(nextAmt*100)/100;
+    /* pa (the VPA) must NOT be percent-encoded: several UPI apps read the value
+       after "pa=" as a raw substring without url-decoding, so an encoded "@"
+       leaves the payee bank stuck loading. pn/tn are free text and do need it. */
+    var q='pa='+String(D.upi.pa).replace(/\s+/g,'')+
+          '&pn='+encodeURIComponent(D.upi.pn||D.sn||'')+
+          '&cu=INR&am='+amt.toFixed(2)+
+          '&tn='+encodeURIComponent('EMI '+(D.b||'')+' #'+nextRow[0]);
+    var SCHEMES={upi:'upi://pay?',gpay:'tez://upi/pay?',phonepe:'phonepe://pay?',paytm:'paytmmp://pay?'};
+    var payLink=function(k){ return (SCHEMES[k]||SCHEMES.upi)+q; };
+
+    upi='<div class="cta cta-static rv"><div class="big">Pay '+R(nextAmt)+' now</div>'+
+        '<div class="sm">'+UNIT+' #'+nextRow[0]+' &nbsp;\u00B7&nbsp; choose an app below</div></div>';
+
+    var apps=[
+      ['gpay','G','GPay'],
+      ['phonepe','\u20B1','PhonePe'],
+      ['paytm','P','Paytm']
+    ].map(function(a){
+      return '<a class="payapp '+a[0]+'" href="'+payLink(a[0])+'">'+
+             '<span class="ic">'+a[1]+'</span><span class="nm">'+a[2]+'</span></a>';
+    });
+
+    /* WhatsApp: opens a chat with the shop carrying the payment details, so the
+       customer can send the screenshot or ask a question. Falls back to the
+       plain wa.me site when no number is on the card. */
+    if(D.sp){
+      var digits=String(D.sp).replace(/\D/g,'');
+      if(digits.length===10) digits='91'+digits;
+      var waMsg=(D.cn||'')+' \u00B7 '+(D.b?'Pledge '+D.b+' \u00B7 ':'')+
+                UNIT+' #'+nextRow[0]+' \u00B7 '+R(nextAmt)+' due '+fD(nextRow[1]);
+      apps.push('<a class="payapp wa" target="_blank" rel="noopener" href="https://wa.me/'+digits+
+                '?text='+encodeURIComponent(waMsg)+'">'+
+                '<span class="ic">\u2709</span><span class="nm">WhatsApp</span></a>');
+    }
+
+    upi+='<div class="payrow rv">'+apps.join('')+'</div>'+
+         '<a class="ghost rv" href="'+payLink('upi')+'">Other UPI app \u00B7 BHIM, Amazon Pay, bank app</a>'+
+         '<div class="payhint">Tap your app to pay '+R(nextAmt)+' directly'+
+         (D.sp?' \u00B7 WhatsApp to message the shop':'')+'</div>';
   }
 
   var age=days(D.gen||TODAY,TODAY);
