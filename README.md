@@ -7,6 +7,14 @@
 <meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#12331F">
 <title>EMI Passbook</title>
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Sivaji Bank">
+<meta property="og:title" content="Sivaji Bank — EMI Passbook">
+<meta property="og:description" content="உங்கள் EMI தவணை விவரங்கள் · Your EMI instalments and dues">
+<meta property="og:image" content="https://sivajibank.github.io/passbook/p/card.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
 <!--
   EMI instalment passbook — v3 (Sivaji Bank Pawnshop Manager 3.12)
   Opens:
@@ -144,7 +152,43 @@ async function decEnc(pin) {
 }
 
 // ── boot ────────────────────────────────────────────────────────────────────
-(function boot() {
+
+// v18 · short link  #S1.<code>.<b64u worker url>  — fetch the PIN-sealed copy kept under the code,
+// put it where the long link would have it, and start exactly as a long link does.
+function __pbShort(boot) {
+  var f = location.hash.replace(/^#/, '');
+  if (f.indexOf('S1.') !== 0) return false;
+  var p = f.split('.'), code = (p[1] || '').replace(/[^0-9A-Z]/g, ''), url = '';
+  try { url = new TextDecoder().decode(b64uDec(p[2] || '')); } catch (e) {}
+  var gate = document.getElementById('gate');
+  var tl = (typeof LANG !== 'undefined' && LANG === 'ta');
+  var box = document.createElement('div'); box.id = 'pb-short';
+  box.style.cssText = 'margin:28px auto;max-width:420px;padding:28px 22px;border-radius:22px;background:#fff;text-align:center;box-shadow:0 18px 40px -22px rgba(10,51,64,.45);font-size:15px;line-height:1.55;color:#14323A';
+  function msg(h) { box.innerHTML = h; }
+  msg('<div style="width:38px;height:38px;border:3px solid rgba(15,76,92,.18);border-top-color:#0F4C5C;border-radius:50%;margin:0 auto 14px;animation:pbsr 1s linear infinite"></div><style>@keyframes pbsr{to{transform:rotate(360deg)}}</style>'
+    + (tl ? 'உங்கள் பாஸ்புக் திறக்கிறது…' : 'Opening your passbook…'));
+  if (gate) { gate.style.display = 'none'; gate.parentNode.insertBefore(box, gate); }
+  var fail = function (gone) {
+    msg('<div style="font-size:34px;margin-bottom:8px">' + (gone ? '📭' : '📶') + '</div><b>' + (gone ? (tl ? 'இந்த இணைப்பு இனி செயல்படாது' : 'This link no longer works') : (tl ? 'உங்கள் பாஸ்புக்கை இப்போது ஏற்ற முடியவில்லை' : 'Couldn’t load your passbook')) + '</b><br>'
+      + (gone ? (tl ? 'கடையில் புதிய இணைப்பை அனுப்பச் சொல்லவும்.' : 'Please ask the shop to send a new link.') : (tl ? 'இணைய இணைப்பைச் சரிபார்த்து மீண்டும் முயற்சிக்கவும்.' : 'Check your internet and try again in a few minutes.'))
+      + (gone ? '' : '<br><button onclick="location.reload()" style="margin-top:14px;padding:11px 22px;border:0;border-radius:12px;background:#0F4C5C;color:#fff;font-weight:700;font-size:15px">' + (tl ? 'மீண்டும் முயற்சி' : 'Try again') + '</button>'));
+  };
+  if (!code || !/^https:\/\//.test(url) && !/^http:\/\/(localhost|127\.)/.test(url)) { fail(true); return true; }
+  fetch(url.replace(/\/+$/, '') + '/p/S' + code, { cache: 'no-store' }).then(function (r) {
+    if (r.status === 404) { fail(true); return null; }
+    if (!r.ok) throw 0;
+    return r.text();
+  }).then(function (t) {
+    if (t == null) return;
+    t = String(t).trim();
+    if (t.indexOf('E1.') !== 0 || t.split('.').length !== 6) { fail(true); return; }
+    try { history.replaceState(null, '', location.pathname + location.search + '#' + t); } catch (e) { location.replace(location.pathname + location.search + '#' + t); return; }
+    box.remove(); if (gate) gate.style.display = '';
+    boot();
+  }).catch(function () { fail(false); });
+  return true;
+}
+function boot() {
   try {
     let frag = location.hash.replace(/^#/, '');
     if (frag.indexOf('E1.') === 0) {
@@ -170,7 +214,8 @@ async function decEnc(pin) {
   }
   setLang(LANG);
   setTimeout(() => { const p = document.getElementById('pin'); if (p) p.focus(); }, 300);
-})();
+}
+if (!__pbShort(boot)) boot();
 function head(sn, st, cn, meta) {
   document.getElementById('h-shop').textContent = '📗 ' + (sn || 'EMI Passbook');
   const e = document.getElementById('h-shopta'); if (st) { e.textContent = st; e.style.display = 'block'; } else e.style.display = 'none';
